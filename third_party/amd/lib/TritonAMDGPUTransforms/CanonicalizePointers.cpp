@@ -456,6 +456,74 @@ struct PointerCanonicalizationPattern : ConversionPattern {
   llvm::SetVector<Operation *> &opToRewrite;
 };
 
+/// distributed dialect extension
+class ConvertConsumeToken : public PointerCanonicalizationPattern<
+                                triton::distributed::ConsumeTokenOp> {
+public:
+  using PointerCanonicalizationPattern::PointerCanonicalizationPattern;
+
+  LogicalResult
+  matchAndRewrite_(triton::distributed::ConsumeTokenOp consumeTokenOp,
+                   OneToNOpAdaptor adaptor,
+                   ConversionPatternRewriter &rewriter) const override {
+    ValueRange remappedOperands = adaptor.getInput();
+    if (remappedOperands.size() != 2) {
+      return success();
+    }
+    Value fatPtrBase = remappedOperands[0];
+    Value fatPtrOffset = remappedOperands[1];
+    if (!llvm::isa<tt::PointerType>(fatPtrBase.getType()))
+      return rewriter.notifyMatchFailure(consumeTokenOp,
+                                         "non tt.ptr base unimplemented");
+
+    // ConsumeTokenOp is just to build data dependencies.
+    // Here, we replace the input(may be tensor ptr) with base ptr without any
+    // impact.
+    triton::distributed::ConsumeTokenOp newConsumeTokenOp =
+        rewriter.create<triton::distributed::ConsumeTokenOp>(
+            consumeTokenOp->getLoc(), fatPtrBase, adaptor.getToken()[0]);
+    rewriter.replaceOpWithMultiple(consumeTokenOp,
+                                   {{newConsumeTokenOp, fatPtrOffset}});
+    fatPtrs[{newConsumeTokenOp, fatPtrOffset}] =
+        fatPtrs.at({fatPtrBase, fatPtrOffset});
+
+    return success();
+  }
+};
+
+class ConvertSymmAt
+    : public PointerCanonicalizationPattern<triton::distributed::SymmAtOp> {
+public:
+  using PointerCanonicalizationPattern::PointerCanonicalizationPattern;
+
+  LogicalResult
+  matchAndRewrite_(triton::distributed::SymmAtOp symmAtOp,
+                   OneToNOpAdaptor adaptor,
+                   ConversionPatternRewriter &rewriter) const override {
+    ValueRange remappedOperands = adaptor.getSymmAddr();
+    if (remappedOperands.size() != 2) {
+      return success();
+    }
+    Value fatPtrBase = remappedOperands[0];
+    Value fatPtrOffset = remappedOperands[1];
+    if (!llvm::isa<tt::PointerType>(fatPtrBase.getType()))
+      return rewriter.notifyMatchFailure(symmAtOp,
+                                         "non tt.ptr base unimplemented");
+
+    // symmAtOp is just to build data dependencies.
+    // Here, we replace the input(may be tensor ptr) with base ptr without any
+    // impact.
+    triton::distributed::SymmAtOp newSymmAtOp =
+        rewriter.create<triton::distributed::SymmAtOp>(
+            newSymmAtOp->getLoc(), fatPtrBase, adaptor.getRank()[0]);
+    rewriter.replaceOpWithMultiple(symmAtOp, {{newSymmAtOp, fatPtrOffset}});
+    fatPtrs[{newSymmAtOp, fatPtrOffset}] =
+        fatPtrs.at({fatPtrBase, fatPtrOffset});
+
+    return success();
+  }
+};
+
 /// splat integer offset, keep base
 class ConvertSplatOp : public PointerCanonicalizationPattern<tt::SplatOp> {
 public:
@@ -1588,6 +1656,11 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
   patterns.add<
       ConvertFuncOpArgsUnrealizedCasts, ConvertBroadcastOp, ConvertSplatOp,
       ConvertConvertLayoutOp, ConvertAddPtrOp, ConvertExtractSliceOp,
+      ConvertConsumeToken, ConvertSymmAt,
+      // distributed dialect extension
+      MaterializeFatPointer<triton::distributed::WaitOp>,
+      MaterializeFatPointer<triton::distributed::NotifyOp>,
+      MaterializeFatPointer<triton::distributed::SymmAtOp>,
       MaterializeFatPointer<tt::AtomicCASOp>,
       MaterializeFatPointer<tt::AtomicRMWOp>,
       MaterializeFatPointer<tt::BitcastOp>, MaterializeFatPointer<tt::LoadOp>,
@@ -1596,8 +1669,9 @@ void TritonAMDGPUCanonicalizePointersPass::runOnOperation() {
       MaterializeFatPointerVariadic<tt::CallOp>,
       MaterializeFatPointerVariadic<tt::ExternElementwiseOp>,
       MaterializeFatPointerVariadic<tt::ElementwiseInlineAsmOp>,
-      MaterializeFatPointerVariadic<tt::PrintOp>, ConvertSCFForOp,
-      ConvertExpandDims, ConvertSCFYieldOp, ConvertSCFIfOp,
+      MaterializeFatPointerVariadic<tt::PrintOp>,
+      MaterializeFatPointerVariadic<triton::distributed::ExternCallOp>,
+      ConvertSCFForOp, ConvertExpandDims, ConvertSCFYieldOp, ConvertSCFIfOp,
       ConvertSCFConditionOp, ConvertSCFWhileOp, ConvertCFCondBranch,
       ConvertCFBranch, ConvertArithSelectOp, ConvertReturnOp>(
       patterns.getContext(), opsToRewrite, fatPrs);

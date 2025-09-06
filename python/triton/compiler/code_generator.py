@@ -21,6 +21,8 @@ from .._utils import find_paths_if, get_iterable_path, set_iterable_path
 
 from .errors import (CompilationError, CompileTimeAssertionFailure, UnsupportedLanguageConstruct)
 
+import triton_dist
+import builtins
 
 def check_identifier_legality(name, type):
     pattern = r'^[a-zA-Z_][a-zA-Z0-9_]*$'
@@ -982,6 +984,9 @@ class CodeGenerator(ast.NodeVisitor):
                 with withitemClass(*args, _builder=self.builder):
                     self.visit_compound_statement(node.body)
                 return
+            if withitemClass == triton_dist.language.simt_exec_region:
+                self._visit_With_simt_exec_region(node)
+                return
 
         cm_list = []
         for item in node.items:
@@ -1057,6 +1062,73 @@ class CodeGenerator(ast.NodeVisitor):
 
     def visit_withitem(self, node):
         return self.visit(node.context_expr)
+
+    #  Extension of dist triton: parse `simt_exec_region`
+    def _visit_With_simt_exec_region(self, node):
+        assert len(node.items) == 1
+        context = node.items[0].context_expr
+        withitemClass = self.visit(context.func)
+        thread_id = language.core.tensor(self.builder.create_get_thread_id(), language.core.int32)
+        block_size = language.core.tensor(self.builder.create_get_block_size(), language.core.int32)
+
+        self.set_value(node.items[0].optional_vars.elts[0].id, thread_id)
+        self.set_value(node.items[0].optional_vars.elts[1].id, block_size)
+        with enter_sub_region(self) as sr:
+            liveins, insert_block = sr
+            ip, last_loc = self._get_insertion_point_and_loc()
+
+            self._set_insertion_point_and_loc(ip, last_loc)
+            # create with node body block
+            dummy = self.builder.create_block()
+            self.builder.set_insertion_point_to_start(dummy)
+            self.scf_stack.append(node)
+            self.visit_compound_statement(node.body)
+            self.scf_stack.pop()
+            dummy.erase()
+
+            # If a variable (name) is defined in both its parent & itself, then it's
+            # captured by SIMT Reigon. (They must be of the same type)
+            names = []
+            init_args = []
+            for name in self.local_defs:
+                if name in liveins:
+                    live_val = liveins[name]
+                    names.append(name)
+                    init_args.append(live_val)
+            self._set_insertion_point_and_loc(ip, last_loc)
+
+            init_tys = [v.type for v in init_args]
+            init_handles = flatten_values_to_ir(init_args)
+
+            simt_op = self.builder.create_simt_exec_region_op(init_handles)
+            block = simt_op.get_simt_entry_block()
+
+            block_handles = [block.arg(i) for i in range(len(init_handles))]
+            block_args = unflatten_ir_values(block_handles, init_tys)
+            # reset local scope/local_defs to not pick up local defs from the previous dry run.
+            self.lscope = liveins.copy()
+            self.local_defs = {}
+            for name, val in zip(names, block_args):
+                self.set_value(name, val)
+
+            self.builder.set_insertion_point_to_start(block)
+            self.builder.create_barrier()
+            self.scf_stack.append(node)
+
+            self.visit_compound_statement(node.body)
+            self.scf_stack.pop()
+            yields = []
+            for name in self.local_defs:
+                if name in liveins:
+                    yields.append(self.local_defs[name])
+            yield_handles = flatten_values_to_ir(yields)
+            self.builder.create_barrier()
+            self.builder.create_block_yield_op(yield_handles)
+
+        result_handles = [simt_op.get_result(i) for i in range(len(init_handles))]
+        result_values = unflatten_ir_values(result_handles, init_tys)
+        for name, val in zip(names, result_values):
+            self.set_value(name, val)
 
     def visit_While(self, node):
         with enter_sub_region(self) as sr:

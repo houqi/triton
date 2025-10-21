@@ -6,7 +6,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-
+#include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
 #include <numeric>
 
 #define DEBUG_TYPE "axis-info"
@@ -1032,6 +1032,10 @@ AxisInfoAnalysis::AxisInfoAnalysis(DataFlowSolver &solver,
                   MaxMinOpAxisInfoVisitor<arith::MinSIOp>,
                   MaxMinOpAxisInfoVisitor<arith::MinUIOp>>();
   visitors.append<LoadOpAxisInfoVisitor>();
+  // Distributed ops
+  visitors
+      .append<BarrierOpAxisInfoVisitor<triton::distributed::ConsumeTokenOp>>();
+  visitors.append<CastOpAxisInfoVisitor<triton::distributed::SymmAtOp>>();
 
   if (callback)
     callback(visitors);

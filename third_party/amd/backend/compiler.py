@@ -1,5 +1,8 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
 from triton.backends.compiler import BaseBackend, GPUTarget, Language
-from triton._C.libtriton import ir, passes, llvm, amd
+from triton._C.libtriton import ir, passes, llvm, amd, distributed
 from triton import knobs
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
@@ -158,11 +161,12 @@ class HIPBackend(BaseBackend):
         from triton.language.extra.hip import librocshmem_device
 
         return {
-            "triton.language.extra.libdevice": libdevice, "triton_dist.language.extra.libshmem_device":
-            librocshmem_device
+            "triton.language.extra.libdevice": libdevice,
+            "triton_dist.language.extra.libshmem_device": librocshmem_device
         }
 
     def load_dialects(self, ctx):
+        distributed.ir.load_dialects(ctx)
         amd.load_dialects(ctx)
         if HIPBackend.instrumentation:
             HIPBackend.instrumentation.load_dialects(ctx)
@@ -215,8 +219,9 @@ class HIPBackend(BaseBackend):
     def make_ttgir(mod, metadata, options):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        passes.ttir.add_convert_to_ttgpuir(pm, f"hip:{options.arch}", options.num_warps, options.warp_size,
-                                           options.num_ctas)
+        # TritonDistributed Extension
+        distributed.passes.ttir.add_convert_to_ttgpuir_ext(pm, f"hip:{options.arch}", options.num_warps,
+                                                           options.warp_size, options.num_ctas)
         pm.run(mod)
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
@@ -315,6 +320,8 @@ class HIPBackend(BaseBackend):
         ##    For now it is used as a controller for developers only.
         __HIP_FTZ = True
         amd.passes.ttgpuir.add_to_llvmir(pm, options.arch, __HIP_FTZ)
+        # TritonDistributed Extension: distributed -> llvm
+        distributed.passes.ttgpuir.amd.add_distributed_to_llvm(pm, options.arch, __HIP_FTZ)
         passes.common.add_canonicalizer(pm)
         passes.common.add_cse(pm)
 
@@ -335,6 +342,8 @@ class HIPBackend(BaseBackend):
             passes.llvmir.add_di_scope(pm)
 
         amd.passes.ttgpuir.add_builtin_func_to_llvmir(pm, __HIP_FTZ)
+        # TritonDistributed Extension: distributed -> llvm
+        distributed.passes.ttgpuir.amd.add_lib_device_to_llvmir(pm, __HIP_FTZ)
         pm.run(mod)
 
         # LLVM-IR (MLIR) -> LLVM-IR (LLVM)
@@ -379,6 +388,11 @@ class HIPBackend(BaseBackend):
         # to user SGPRs so that the kernel does not need to s_load its arguments
         # from memory.
         amd.set_all_fn_arg_inreg(fns[0])
+        metadata['use_rocshmem'] = False
+        for k in llvm_mod.get_functions():
+            if "rocshmem" in k.name and k.is_declaration():
+                metadata['use_rocshmem'] = True
+                break
 
         if knobs.compilation.enable_asan:
             default_libdir = Path(__file__).parent / 'lib'

@@ -1,3 +1,6 @@
+/*
+ * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ */
 #include "triton/Dialect/TritonGPU/Transforms/PipeliningUtility.h"
 #include "mlir/Analysis/TopologicalSortUtils.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -19,6 +22,8 @@
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include <queue>
+
+#include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
 
 #define DEBUG_TYPE "triton-loop-pipeline"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")
@@ -270,6 +275,24 @@ Operation *mlir::triton::predicateOp(RewriterBase &rewriter, Operation *op,
                              atomicRMWOp.getMask(), pred);
     atomicRMWOp.getMaskMutable().assign(mask);
     return op;
+  }
+  // TODO(zhengsize): add predicate to distributed ops?
+  // Distributed barrier ops
+  if (isa<triton::distributed::ConsumeTokenOp>(op))
+    return op;
+  if (isa<triton::distributed::WaitOp>(op)) {
+    // fallback to branch
+    scf::IfOp newIfOp = rewriter.create<scf::IfOp>(
+        op->getLoc(), op->getResultTypes(), pred, true);
+    auto thenB = newIfOp.getThenBodyBuilder();
+    auto newOpInThen = thenB.clone(*op);
+    thenB.create<scf::YieldOp>(op->getLoc(), newOpInThen->getResults());
+    auto elseB = newIfOp.getElseBodyBuilder();
+    auto elseConst = elseB.create<arith::ConstantOp>(
+        op->getLoc(), IntegerAttr::get(op->getResultTypes().front(), 0));
+    elseB.create<scf::YieldOp>(op->getLoc(), elseConst->getResults());
+    rewriter.replaceOp(op, newIfOp.getResults());
+    return newIfOp;
   }
   if (!op->isRegistered()) {
     // Skip ops from unregistered dialects to make writing lit tests easier.

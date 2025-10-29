@@ -1,3 +1,6 @@
+/*
+ * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ */
 #include "triton/Analysis/AxisInfo.h"
 #include "mlir/Analysis/DataFlowFramework.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
@@ -985,6 +988,18 @@ public:
       }
       return AxisInfo(contiguity, divisibility, constancy, std::nullopt);
     }
+  }
+};
+
+template <typename OpTy>
+class BarrierOpAxisInfoVisitor final : public AxisInfoVisitorImpl<OpTy> {
+public:
+  using AxisInfoVisitorImpl<OpTy>::AxisInfoVisitorImpl;
+
+  AxisInfo
+  getAxisInfo(OpTy op,
+              ArrayRef<const dataflow::Lattice<AxisInfo> *> operands) override {
+    return operands[0]->getValue();
   }
 };
 

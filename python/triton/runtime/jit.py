@@ -1,3 +1,6 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
 from __future__ import annotations, division
 import ast
 import copy
@@ -127,6 +130,9 @@ class DependenciesFinder(ast.NodeVisitor):
 
         # Stubs that aren't real functions
         if getattr(val, "__module__", "") == "triton.language.extra.libdevice":
+            return
+
+        if getattr(val, "__module__", "") == "triton_dist.language.extra.libshmem_device":
             return
 
         if isinstance(val, JITCallable):

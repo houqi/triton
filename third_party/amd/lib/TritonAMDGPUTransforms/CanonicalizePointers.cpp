@@ -1,3 +1,6 @@
+/*
+ * Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+ */
 #include "TritonAMDGPUTransforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
@@ -31,6 +34,8 @@
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/LogicalResult.h"
 #include <utility>
+
+#include "TritonDistributed/Dialect/Distributed/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritonamdgpu-canonicalize-pointers"
 #define DBGS() (llvm::dbgs() << "[" DEBUG_TYPE "]: ")

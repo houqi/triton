@@ -1,3 +1,6 @@
+################################################################################
+# Modification Copyright 2025 ByteDance Ltd. and/or its affiliates.
+################################################################################
 import ast
 import builtins
 import contextlib
@@ -12,7 +15,7 @@ from types import ModuleType
 from typing import Any, Callable, Dict, Optional, Tuple, Type, Union, Iterable, List
 
 from .. import knobs, language
-from .._C.libtriton import ir, gluon_ir
+from .._C.libtriton import ir, gluon_ir, distributed
 from ..language import constexpr, str_to_ty, tensor, tuple as tl_tuple
 from ..language.core import _unwrap_if_constexpr, base_value, base_type
 # ideally we wouldn't need any runtime component
@@ -307,7 +310,7 @@ class CodeGenerator(ast.NodeVisitor):
             self.semantic = GluonSemantic(self.builder)
         else:
             from triton.language.semantic import TritonSemantic
-            self.builder = ir.builder(context)
+            self.builder = distributed.ir.DistributedOpBuilder(context)
             self.semantic = TritonSemantic(self.builder)
 
         self.name_loc_as_prefix = None
@@ -1192,10 +1195,31 @@ class CodeGenerator(ast.NodeVisitor):
         lhs = self.visit(node.value)
         slices = self.visit(node.slice)
         if _is_triton_value(lhs):
+            # Extension of dist triton
+            if isinstance(slices, (builtins.slice, language.core.slice, constexpr, tensor)) or slices is None:
+                slices = [slices]
+            if isinstance(slices, tuple):
+                slices = slices.values
+            is_extract = True
+            for sl in slices:
+                if not isinstance(sl, (constexpr, tensor)):
+                    is_extract = False
+                if isinstance(sl, constexpr) and sl.value is None:
+                    is_extract = False
+            if is_extract:
+                return triton_dist.language.extract(lhs, slices, self.semantic)
             return self.call_Method(node, lhs.__getitem__, lhs, [slices], {})
         return lhs[slices]
 
     def visit_Subscript_Store(self, node, value):
+        assert isinstance(node.ctx, ast.Store)
+        lhs = self.visit(node.value)
+        slices = self.visit(node.slice)
+        # Extension of dist triton: store value to tile
+        if _is_triton_tensor(lhs):
+            ret = triton_dist.language.insert(lhs, value, slices, self.semantic)
+            self.set_value(node.value.id, ret)
+            return
         raise NotImplementedError("__setitem__ is not supported in triton")
 
     def visit_Subscript(self, node):
